@@ -27,6 +27,75 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
 
 
+# ===================== 合规过滤（Pexels/Pixabay 内容使用条款）=====================
+
+# 涉及可识别人物的关键词 → 规则3：不能以不道德或非法方式使用涉及可识别人物的内容
+# 涉及商标/品牌的关键词 → 规则2：含可识别商标标志的内容不得用于商业目的
+# 涉及误导性内容的关键词 → 规则4：不能以误导或欺骗方式使用
+HUMAN_RELATED_KEYWORDS = [
+    "face", "portrait", "selfie", "person face", "celebrity", "actor",
+    "actress", "politician", "famous person", "crowd face",
+    "明星", "人脸", "肖像", "自拍照",
+]
+
+BRAND_RELATED_KEYWORDS = [
+    "logo", "brand", "trademark", "coca cola", "nike", "adidas", "apple logo",
+    "mcdonalds", "starbucks", "brand name", "product label",
+    "商标", "品牌", "标志",
+]
+
+MISLEADING_RELATED_KEYWORDS = [
+    "fake", "deceptive", "misleading", "scam", "fraud",
+    "medical claim", "cure", "miracle", "guaranteed",
+    "虚假", "欺骗", "误导", "神效", "包治",
+]
+
+
+def is_compliant_clip(clip: Dict[str, Any], search_query: str = "") -> tuple:
+    """
+    检查素材是否符合 Pexels/Pixabay 内容使用条款。
+    返回 (是否合规, 原因说明)。
+    """
+    # 合并搜索词和素材自身字段做检查
+    check_text = (
+        f"{search_query} "
+        f"{clip.get('search_query', '')} "
+        f"{clip.get('tags', '')} "
+        f"{clip.get('page_url', '')} "
+        f"{clip.get('preview_url', '')} "
+        f"{clip.get('download_url', '')}"
+    ).lower()
+
+    # 规则3：涉及可识别人物的内容需谨慎
+    for kw in HUMAN_RELATED_KEYWORDS:
+        if kw.lower() in check_text:
+            return False, f"涉及可识别人物（关键词：{kw}），按条款3需谨慎使用"
+
+    # 规则2：含可识别商标/品牌的内容不得用于商业目的
+    for kw in BRAND_RELATED_KEYWORDS:
+        if kw.lower() in check_text:
+            return False, f"含可识别商标/品牌（关键词：{kw}），按条款2不得用于商业目的"
+
+    # 规则4：不能以误导或欺骗方式使用
+    for kw in MISLEADING_RELATED_KEYWORDS:
+        if kw.lower() in check_text:
+            return False, f"可能涉及误导性内容（关键词：{kw}），按条款4禁止"
+
+    return True, "合规"
+
+
+def filter_compliant_clips(clips: List[Dict[str, Any]], search_query: str = "") -> List[Dict[str, Any]]:
+    """过滤出符合使用条款的素材。"""
+    compliant = []
+    for clip in clips:
+        ok, reason = is_compliant_clip(clip, search_query)
+        if ok:
+            compliant.append(clip)
+        else:
+            print(f"[合规] 过滤掉素材 #{clip.get('id','?')}: {reason}")
+    return compliant
+
+
 # ===================== Pexels =====================
 
 def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
@@ -83,6 +152,7 @@ def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
             "preview_url": v.get("image", ""),
             "page_url": v.get("url", ""),
             "search_query": query,
+            "tags": "",  # Pexels search 端点不返回 tags，留空
         })
     return results
 
@@ -138,6 +208,7 @@ def pixabay_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
             "preview_url": v.get("previewImage", v.get("userImageURL", "")),
             "page_url": v.get("pageURL", ""),
             "search_query": query,
+            "tags": v.get("tags", ""),  # Pixabay 返回逗号分隔的标签字符串，用于合规检查
         })
     return results
 
@@ -145,10 +216,21 @@ def pixabay_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
 # ===================== 聚合搜索 + 下载 =====================
 
 def search_clips(query: str, per_source: int = 3) -> List[Dict[str, Any]]:
-    """双源聚合搜索，合并去重，按分辨率降序。"""
+    """
+    双源聚合搜索，合并去重，按分辨率降序。
+    自动过滤不合规素材（Pexels/Pixabay 内容使用条款）。
+    """
     pexels = pexels_search(query, per_page=per_source)
     pixabay = pixabay_search(query, per_page=per_source)
     merged = pexels + pixabay
+
+    # 合规过滤（Pexels/Pixabay 内容使用条款 5 条禁止使用规则）
+    total_before = len(merged)
+    merged = filter_compliant_clips(merged, query)
+    total_after = len(merged)
+    if total_before > total_after:
+        print(f"[合规] '{query}': 过滤掉 {total_before - total_after} 个不合规素材，剩余 {total_after} 个")
+
     # 按分辨率（像素总数）降序
     merged.sort(key=lambda x: x["width"] * x["height"], reverse=True)
     return merged
@@ -182,16 +264,17 @@ def fetch_clips_for_shot(
     keywords: 该分镜的多个搜索关键词（AI 生成脚本时会给出）
     返回已下载的素材信息列表（通常 1 个，失败时可能 0 个）。
     """
-    # 对每个关键词都搜一遍，取合集
+    # 对每个关键词都搜一遍，取合集（search_clips 已内置合规过滤）
     all_candidates = []
     for kw in keywords:
         candidates = search_clips(kw, per_source=config.CLIPS_PER_SHOT)
         all_candidates.extend(candidates)
-        if len(all_candidates) >= 10:
-            break  # 候选够多了
+        if len(all_candidates) >= 15:
+            break  # 合规候选够多了
 
     if not all_candidates:
-        print(f"[素材] 分镜 {shot_index}: 所有关键词都无结果 {keywords}")
+        print(f"[素材] 分镜 {shot_index}: 所有关键词均无合规素材 {keywords}")
+        print(f"[素材]   → 所有结果被合规过滤（人物/商标/误导），该分镜将无素材")
         return []
 
     # 选最好的 max_clips 个
