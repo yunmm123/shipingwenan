@@ -1,0 +1,112 @@
+name: 打包发布
+
+# 两种触发方式：
+# 1. 推送 v 开头的 tag（如 v1.0.0）→ 自动创建 GitHub Release 并附带 zip
+# 2. 在 Actions 页面手动点击 "Run workflow" → 只打包不发布，下载 artifact
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 创建 Release 需要
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备打包目录
+        run: |
+          mkdir -p package/shipingwenan
+          # 把所有文件复制到 package/shipingwenan/ 下
+          # 排除 .git、.github 等非用户文件
+          rsync -av --exclude='.git' --exclude='.github' \
+                 --exclude='__pycache__' --exclude='output' \
+                 --exclude='.env' ./ package/shipingwenan/
+
+      - name: 生成开箱即用说明
+        run: |
+          cat > package/shipingwenan/快速开始.txt << 'EOF'
+          ╔══════════════════════════════════════════════╗
+          ║   AI 冷知识视频生产线 - 开箱即用版           ║
+          ╚══════════════════════════════════════════════╝
+
+          【第 1 步】安装 Python 3.10+
+            去 https://www.python.org/downloads/ 下载安装
+            安装时勾选 "Add Python to PATH"
+
+          【第 2 步】配置 API Key
+            把 .env.example 复制为 .env
+            用记事本打开 .env，填入三个 key：
+              PIXABAY_API_KEY=你的Pixabay密钥
+              LLM_API_KEY=你的Qwen密钥
+              PEXELS_API_KEY=（待申请，可留空）
+
+          【第 3 步】安装依赖
+            在本文件夹打开命令行（地址栏输入 cmd 回车）
+            执行：pip install -r requirements.txt
+
+          【第 4 步】运行
+            python pipeline.py
+
+          【输出位置】
+            output/YYYY-MM-DD/ 目录下
+            - script.md      分镜脚本（剪辑对照用）
+            - manifest.csv   剪辑清单
+            - clips/         已下载的素材
+            - bgm_suggestions.json  配乐推荐
+
+          【常见问题】
+            Q: pip 不是内部命令？
+            A: Python 没加入 PATH，重装勾选 "Add Python to PATH"
+
+            Q: ModuleNotFoundError？
+            A: 依赖没装好，重新执行 pip install -r requirements.txt
+
+            Q: 热点抓取失败？
+            A: 正常现象，会自动降级到季节性种子话题，不影响使用
+          EOF
+
+      - name: 打包成 zip
+        run: |
+          cd package
+          zip -r ../shipingwenan.zip shipingwenan/
+          cd ..
+          ls -lh shipingwenan.zip
+
+      - name: 上传为 Artifact（手动触发时可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: shipingwenan
+          path: shipingwenan.zip
+          retention-days: 30
+
+      - name: 创建 GitHub Release（仅 tag 触发时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: shipingwenan.zip
+          name: AI冷知识视频生产线 ${{ github.ref_name }}
+          body: |
+            ## 下载即用版
+
+            下载下方的 `shipingwenan.zip`，解压后按里面的「快速开始.txt」操作即可。
+
+            ## 包含内容
+            - 完整 Python 源码（9 个文件）
+            - 配置模板 .env.example
+            - 使用说明 README.md + 快速开始.txt
+            - 依赖清单 requirements.txt
+
+            ## 快速开始
+            1. 解压 zip
+            2. 复制 .env.example 为 .env，填入 API Key
+            3. `pip install -r requirements.txt`
+            4. `python pipeline.py`
+          generate_release_notes: true
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
