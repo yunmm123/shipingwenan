@@ -1,0 +1,38 @@
+╔══════════════════════════════════════════════╗
+║   AI 冷知识视频生产线 - 开箱即用版           ║
+╚══════════════════════════════════════════════╝
+
+【第 1 步】安装 Python 3.10+
+  去 https://www.python.org/downloads/ 下载安装
+  安装时勾选 "Add Python to PATH"
+
+【第 2 步】配置 API Key
+  把 .env.example 复制为 .env
+  用记事本打开 .env，填入三个 key：
+    PIXABAY_API_KEY=你的Pixabay密钥
+    LLM_API_KEY=你的Qwen密钥
+    PEXELS_API_KEY=（待申请，可留空）
+
+【第 3 步】安装依赖
+  在本文件夹打开命令行（地址栏输入 cmd 回车）
+  执行：pip install -r requirements.txt
+
+【第 4 步】运行
+  python pipeline.py
+
+【输出位置】
+  output/YYYY-MM-DD/ 目录下
+  - script.md      分镜脚本（剪辑对照用）
+  - manifest.csv   剪辑清单
+  - clips/         已下载的素材
+  - bgm_suggestions.json  配乐推荐
+
+【常见问题】
+  Q: pip 不是内部命令？
+  A: Python 没加入 PATH，重装勾选 "Add Python to PATH"
+
+  Q: ModuleNotFoundError？
+  A: 依赖没装好，重新执行 pip install -r requirements.txt
+
+  Q: 热点抓取失败？
+  A: 正常现象，会自动降级到季节性种子话题，不影响使用
