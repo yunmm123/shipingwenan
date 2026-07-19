@@ -107,25 +107,32 @@ def run_pipeline(topic_only: bool = False, dry_run: bool = False, pick_index: in
     print(f"\n[选定] 执行第 {idx+1} 个选题：{chosen.get('title')}")
 
     # ===== Step 4: 生成分镜脚本 =====
-    print("\n▶ STEP 3/5 生成分镜脚本")
+    print("\n▶ STEP 3/6 生成分镜脚本")
     script = script_generator.generate_script(chosen)
     md = script_generator.script_to_markdown(chosen, script)
     save_text(out_dir / "script.md", md)
     save_json(out_dir / "script.json", script)
 
+    # ===== Step 4.5: 生成发布信息 =====
+    print("\n▶ STEP 4/6 生成抖音发布文案（标题/描述/话题）")
+    publish_info = script_generator.generate_publish_info(chosen, script)
+    save_json(out_dir / "publish_info.json", publish_info)
+    publish_md = script_generator.publish_info_to_markdown(publish_info)
+    save_text(out_dir / "发布文案.md", publish_md)
+
     # ===== Step 5: 抓取素材 =====
     if dry_run:
-        print("\n▶ STEP 4/5 [跳过] --dry-run 模式，不下载素材")
+        print("\n▶ STEP 5/6 [跳过] --dry-run 模式，不下载素材")
         clips_map = {}
     else:
-        print("\n▶ STEP 4/5 并发抓取素材（Pexels + Pixabay）")
+        print("\n▶ STEP 5/6 并发抓取素材（Pexels + Pixabay）")
         clips_map = stock_api.fetch_all_clips(script["shots"], out_dir / "clips")
         success = sum(1 for v in clips_map.values() if v)
         total = len(script["shots"])
         print(f"[素材] {success}/{total} 个分镜成功抓到素材")
 
     # ===== 生成清单 + BGM 推荐 =====
-    print("\n▶ STEP 5/5 生成剪辑清单与配乐推荐")
+    print("\n▶ STEP 6/6 生成剪辑清单与配乐推荐")
     manifest = build_manifest(script["shots"], clips_map)
     save_text(out_dir / "manifest.csv", manifest)
 
@@ -144,6 +151,8 @@ def run_pipeline(topic_only: bool = False, dry_run: bool = False, pick_index: in
   ├── topics.json           # 所有候选选题（{len(topics)} 个）
   ├── script.md             # 分镜脚本（人类可读，剪辑对照用）
   ├── script.json           # 分镜脚本（结构化）
+  ├── publish_info.json     # 发布文案（标题/描述/话题，结构化）
+  ├── 发布文案.md           # 发布文案（人类可读，含复制清单）
   ├── manifest.csv          # 剪辑清单（分镜→素材文件名映射）
   ├── bgm_suggestions.json  # 配乐推荐
   ├── hot_topics_raw.json   # 原始热点数据
@@ -151,13 +160,19 @@ def run_pipeline(topic_only: bool = False, dry_run: bool = False, pick_index: in
       {len([f for f in (out_dir / 'clips').glob('*.mp4')])} 个文件
 
 🎬 下一步（手动 5 分钟）：
+  【剪辑阶段】
   1. 打开剪映，把 clips/ 里的视频按 manifest.csv 顺序拖进去
   2. 把 script.md 里「完整解说文案」复制到剪映文本 → 智能配音
   3. 按 bgm_suggestions.json 推荐去对应站点下配乐
   4. 加字幕（思源黑体）+ 关键词高亮
-  5. 导出 1080p 横屏，发布抖音
+  5. 导出 1080p 横屏
+
+  【发布阶段】
+  6. 打开「发布文案.md」，复制标题、描述、话题
+  7. 按封面建议做封面，按发布建议选时机
+  8. 发布到抖音
 """)
-    return {"out_dir": str(out_dir), "topic": chosen, "script": script, "clips": clips_map}
+    return {"out_dir": str(out_dir), "topic": chosen, "script": script, "clips": clips_map, "publish_info": publish_info}
 
 
 if __name__ == "__main__":

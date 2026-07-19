@@ -35,6 +35,7 @@ defaults = {
     'topics': None,
     'selected_topic_idx': None,
     'script': None,
+    'publish_info': None,
     'clips_map': None,
     'clips_dir': None,
     'current_step': 0,
@@ -266,6 +267,13 @@ if st.session_state.topics and st.session_state.selected_topic_idx is not None:
                 st.session_state.script = script
                 st.session_state.current_step = 4
                 st.success(f"✅ 生成 {len(script.get('shots',[]))} 个分镜")
+                # 同步生成发布文案
+                try:
+                    publish_info = script_generator.generate_publish_info(selected, script)
+                    st.session_state.publish_info = publish_info
+                    st.success("✅ 发布文案已生成")
+                except Exception as pe:
+                    st.warning(f"发布文案生成失败：{pe}")
             except Exception as e:
                 st.error(f"生成失败：{e}")
                 st.exception(e)
@@ -313,6 +321,59 @@ if st.session_state.script:
                 st.write(shot.get('visual_note', ''))
                 st.write(f"**🔍 搜索关键词**：")
                 st.write(", ".join(shot.get('keywords', [])))
+
+
+# ============ Step 3.5: 生成发布文案 ============
+st.header("📣 步骤 3.5：生成抖音发布文案")
+
+if st.session_state.script:
+    if st.button("✍️ AI 生成发布文案（标题/描述/话题）", use_container_width=False, type="primary"):
+        with st.spinner("AI 正在写发布文案（约 15-30 秒）..."):
+            try:
+                import script_generator
+                import importlib
+                importlib.reload(script_generator)
+                selected = st.session_state.topics[st.session_state.selected_topic_idx]
+                publish_info = script_generator.generate_publish_info(selected, st.session_state.script)
+                st.session_state.publish_info = publish_info
+                st.success("✅ 发布文案已生成，可打包下载")
+                st.rerun()
+            except Exception as e:
+                st.error(f"生成失败：{e}")
+                st.exception(e)
+elif st.session_state.topics:
+    st.info("请先生成分镜脚本")
+else:
+    st.info("请先完成步骤 3")
+
+
+# ============ 发布文案展示 ============
+if st.session_state.publish_info:
+    publish_info = st.session_state.publish_info
+    st.subheader("📣 发布文案（剪完直接用）")
+
+    # 用三列展示核心信息
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("标题字数", f"{len(publish_info.get('title',''))}/25")
+    with p2:
+        st.metric("描述字数", f"{len(publish_info.get('description',''))}/200")
+    with p3:
+        st.metric("话题数", f"{len(publish_info.get('hashtags',[]))}/5")
+
+    with st.expander("📋 查看完整发布文案（点击展开复制）", expanded=True):
+        st.write(f"**📌 作品标题**")
+        st.code(publish_info.get('title', ''), language='text')
+
+        st.write(f"**📝 作品描述**")
+        st.code(publish_info.get('description', ''), language='text')
+
+        st.write(f"**🏷️ 相关话题**")
+        st.code(" ".join(publish_info.get('hashtags', [])), language='text')
+
+        st.write(f"**🖼️ 封面建议**：{publish_info.get('cover_suggestion', '')}")
+        st.write(f"**💡 发布建议**：{publish_info.get('publish_tips', '')}")
+
 
 
 # ============ Step 4: 下载素材 + 打包 ============
@@ -397,24 +458,42 @@ if st.session_state.script:
                         with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                             zf.writestr("script.md", md_content)
                             zf.writestr("script.json", json.dumps(st.session_state.script, ensure_ascii=False, indent=2))
+
+                            # 发布文案
+                            if st.session_state.publish_info:
+                                publish_info = st.session_state.publish_info
+                                publish_md = script_generator.publish_info_to_markdown(publish_info)
+                                zf.writestr("发布文案.md", publish_md)
+                                zf.writestr("publish_info.json", json.dumps(publish_info, ensure_ascii=False, indent=2))
+
                             zf.writestr("manifest.csv", csv_buf.getvalue())
                             zf.writestr("bgm_suggestions.json", json.dumps({
                                 "mood": bgm_mood,
                                 "sources": bgm_recs,
                             }, ensure_ascii=False, indent=2))
-                            zf.writestr("快速开始.txt", """打包内容：
-- script.md       分镜脚本（剪辑对照用）
-- script.json     脚本结构化数据
-- manifest.csv    剪辑清单（分镜对应哪个素材）
-- bgm_suggestions.json  配乐推荐
-- clips/          已下载的 CC0 视频素材
 
-剪辑流程：
+                            # 快速开始说明
+                            has_publish = "✅" if st.session_state.publish_info else "❌"
+                            zf.writestr("快速开始.txt", f"""打包内容：
+- 发布文案.md       发布文案（标题/描述/话题，含复制清单）{has_publish}
+- publish_info.json  发布文案结构化数据
+- script.md         分镜脚本（剪辑对照用）
+- script.json       脚本结构化数据
+- manifest.csv      剪辑清单（分镜对应哪个素材）
+- bgm_suggestions.json  配乐推荐
+- clips/            已下载的 CC0 视频素材
+
+【剪辑阶段】
 1. 打开剪映，把 clips/ 里的视频按 manifest.csv 顺序拖进去
 2. 把 script.md 的"完整解说文案"复制到剪映文本 → 智能配音
 3. 按 bgm_suggestions.json 推荐下配乐
 4. 字幕用思源黑体，加关键词高亮
-5. 导出 1080p 横屏发布抖音
+5. 导出 1080p 横屏
+
+【发布阶段】
+6. 打开「发布文案.md」，复制标题、描述、话题
+7. 按封面建议做封面，按发布建议选时机
+8. 发布到抖音
 """)
                             # 添加视频文件
                             for idx, clips in st.session_state.clips_map.items():

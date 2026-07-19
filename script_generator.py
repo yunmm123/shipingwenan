@@ -185,6 +185,136 @@ def generate_script(topic: Dict[str, Any]) -> Dict[str, Any]:
     return script
 
 
+# ===================== Step 4.5: 生成发布信息 =====================
+
+def generate_publish_info(topic: Dict[str, Any], script: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    基于选题和脚本，生成抖音发布所需的作品信息。
+    返回结构：
+    {
+      "title": "25字以内的作品标题",
+      "description": "200字以内的作品描述",
+      "hashtags": ["#话题1", "#话题2", "#话题3", "#话题4", "#话题5"],
+      "cover_suggestion": "封面文字建议",
+      "publish_tips": "发布时机和注意事项建议"
+    }
+    """
+    system = f"""你是一位抖音冷知识赛道的爆款运营专家，精通抖音算法和用户心理。
+你要为一条已经写好的冷知识短视频生成发布所需的文案。
+
+抖音发布文案规则：
+1. 作品标题（≤25字）：必须有强悬念或反差，不能直接剧透答案，激发点击欲
+2. 作品描述（≤200字）：第一句必须是钩子，中间补充知识点背景，结尾引导互动（评论/收藏/关注）
+3. 相关话题（≤5个）：1-2个赛道大词（如#冷知识 #科普）+ 2-3个选题相关词 + 1个蹭热点词
+4. 话题要真实存在且有热度，不要生造
+5. 不要用"震惊""不转不是X"等低质诱导词
+
+输出严格 JSON：
+{{
+  "title": "作品标题，≤25字",
+  "description": "作品描述，≤200字",
+  "hashtags": ["#话题1", "#话题2", "#话题3", "#话题4", "#话题5"],
+  "cover_suggestion": "封面应该突出的关键词或文字（10字以内）",
+  "publish_tips": "发布时机和注意事项（一句话）"
+}}
+
+只输出 JSON，不要解释。"""
+
+    user = f"""请为以下视频生成发布文案：
+
+选题标题：{topic.get('title')}
+开场钩子：{topic.get('hook')}
+科普角度：{topic.get('angle')}
+对应热点：{topic.get('hot_source', '无')}
+BGM情绪：{script.get('bgm_mood', 'curious')}
+视频时长：{script.get('total_duration', 240)}秒
+
+解说文案摘要（前100字）：
+{script.get('narration_full', '')[:100]}
+
+要求：
+- 标题≤25字，带强悬念
+- 描述≤200字，首句钩子+结尾互动引导
+- 5个话题，含1-2个赛道大词+蹭热点词
+- 整体风格符合抖音冷知识爆款调性"""
+
+    raw = _chat(system, user, temperature=0.85)
+
+    # 容错解析
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end > start:
+            info = json.loads(raw[start : end + 1])
+        else:
+            raise
+
+    # 安全校验：超长截断，话题数限制
+    info["title"] = info.get("title", "")[:25]
+    info["description"] = info.get("description", "")[:200]
+    info["hashtags"] = info.get("hashtags", [])[:5]
+    info.setdefault("cover_suggestion", "")
+    info.setdefault("publish_tips", "")
+
+    print(f"[发布] 标题({len(info['title'])}字): {info['title']}")
+    print(f"[发布] 描述({len(info['description'])}字)")
+    print(f"[发布] 话题: {' '.join(info['hashtags'])}")
+    return info
+
+
+def publish_info_to_markdown(info: Dict[str, Any]) -> str:
+    """把发布信息转成易读的 Markdown 文档。"""
+    lines = [
+        "# 📱 抖音发布文案（直接复制使用）",
+        "",
+        "## 作品标题",
+        "",
+        f"**{info.get('title', '')}**",
+        "",
+        "## 作品描述",
+        "",
+        info.get("description", ""),
+        "",
+        "## 相关话题（发布时填到话题栏）",
+        "",
+        " ".join(info.get("hashtags", [])),
+        "",
+        "## 封面建议",
+        "",
+        f"封面文字突出：**{info.get('cover_suggestion', '')}**",
+        "",
+        "## 发布建议",
+        "",
+        info.get("publish_tips", ""),
+        "",
+        "---",
+        "",
+        "## 📋 复制清单",
+        "",
+        "### 标题（复制到标题栏）",
+        "```",
+        info.get("title", ""),
+        "```",
+        "",
+        "### 描述（复制到描述栏）",
+        "```",
+        info.get("description", ""),
+        "```",
+        "",
+        "### 话题（复制到话题栏）",
+        "```",
+        " ".join(info.get("hashtags", [])),
+        "```",
+    ]
+    return "\n".join(lines)
+
+
 def script_to_markdown(topic: Dict[str, Any], script: Dict[str, Any]) -> str:
     """把脚本转成易读的 Markdown 文档，方便用户剪辑时对照。"""
     lines = [
