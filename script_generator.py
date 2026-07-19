@@ -7,8 +7,158 @@ AI 选题与脚本生成模块
 输出结构化 JSON，方便后续素材抓取模块直接消费。
 """
 import json
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Union
 import config
+
+
+# ===================== JSON 健壮解析器 =====================
+
+def _robust_json_loads(raw: str, expect_type: type = None) -> Union[List, Dict]:
+    """
+    多策略 JSON 解析器，专治 LLM 输出的"不标准 JSON"。
+    按顺序尝试 5 种修复策略，全部失败才抛异常。
+
+    常见 LLM JSON 问题：
+    1. 包 ```json ... ``` 代码块
+    2. 前后带解释文字
+    3. 字符串值里含未转义的双引号
+    4. 字符串值里含未转义的换行
+    5. 尾部多余的逗号
+    6. 单引号代替双引号
+    """
+    raw = raw.strip() if raw else ""
+
+    # 策略1：去掉 markdown 代码块标记
+    if raw.startswith("```"):
+        # 去掉首行 ``` 或 ```json
+        lines = raw.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        # 去掉末尾 ```
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
+    # 策略2：直接尝试解析
+    try:
+        result = json.loads(raw)
+        if _check_type(result, expect_type):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # 策略3：提取首个 [ 到末尾 ] 或首个 { 到末尾 }
+    open_char = "[" if expect_type == list else "{"
+    close_char = "]" if expect_type == list else "}"
+    # 如果没指定类型，优先尝试从第一个 { 或 [ 开始
+    if expect_type is None:
+        first_obj = raw.find("{")
+        first_arr = raw.find("[")
+        if first_obj >= 0 and (first_arr < 0 or first_obj < first_arr):
+            open_char, close_char = "{", "}"
+        elif first_arr >= 0:
+            open_char, close_char = "[", "]"
+
+    start = raw.find(open_char)
+    end = raw.rfind(close_char)
+    if start >= 0 and end > start:
+        candidate = raw[start : end + 1]
+        try:
+            result = json.loads(candidate)
+            if _check_type(result, expect_type):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # 策略4：修复常见 JSON 格式问题后重试
+        fixed = _fix_common_json_issues(candidate)
+        try:
+            result = json.loads(fixed)
+            if _check_type(result, expect_type):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # 策略5：用正则逐个提取键值对（最后兜底，针对 dict）
+        if expect_type == dict or (expect_type is None and open_char == "{"):
+            result = _regex_extract_dict(candidate)
+            if result and _check_type(result, expect_type):
+                return result
+
+    # 全部失败，抛出带原始内容的异常，方便调试
+    raise json.JSONDecodeError(
+        f"无法解析 LLM 输出为 JSON。原始内容前 300 字符：\n{raw[:300]}",
+        raw, 0
+    )
+
+
+def _check_type(result, expect_type) -> bool:
+    """检查解析结果类型是否符合预期。"""
+    if expect_type is None:
+        return True
+    if expect_type == list:
+        return isinstance(result, list)
+    if expect_type == dict:
+        return isinstance(result, dict)
+    return True
+
+
+def _fix_common_json_issues(s: str) -> str:
+    """修复 LLM 输出 JSON 时的常见格式问题。"""
+    # 1. 去掉尾部多余的逗号（}, ] 前的逗号）
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+
+    # 2. 单引号转双引号（注意不能误伤已经是双引号的内容）
+    # 这个操作比较危险，只在纯单引号场景下做
+    if "'" in s and '"' not in s:
+        s = s.replace("'", '"')
+
+    # 3. 修复字符串值内未转义的换行符
+    # 找到所有双引号字符串，把内部的换行替换成 \n
+    def fix_string_newlines(match):
+        content = match.group(1)
+        # 把实际换行替换成转义换行
+        content = content.replace("\n", "\\n").replace("\r", "\\r")
+        return f'"{content}"'
+    # 匹配 "..." 但不匹配已经被转义的
+    s = re.sub(r'"((?:[^"\\]|\\.)*?)(?<!\\)"', fix_string_newlines, s, flags=re.DOTALL)
+
+    # 4. 修复键名没加引号的情况 {title: "..."} → {"title": "..."}
+    s = re.sub(r'(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', s)
+
+    # 5. 把中文引号统一成英文双引号
+    s = s.replace("\u201c", '"').replace("\u201d", '"')
+    s = s.replace("\u2018", '"').replace("\u2019", '"')
+
+    return s
+
+
+def _regex_extract_dict(s: str) -> Dict:
+    """最后兜底：用正则逐个提取顶层键值对，构造 dict。"""
+    result = {}
+    # 匹配 "key": "value" 或 "key": number 或 "key": [...] 或 "key": {...}
+    # 这个方法比较粗糙，但能救回一些极端情况
+    pattern = r'"([^"]+)"\s*:\s*("(?:[^"\\]|\\.)*"|[\d.]+|\[[\s\S]*?\]|\{[\s\S]*?\}|true|false|null)'
+    for match in re.finditer(pattern, s):
+        key = match.group(1)
+        val_str = match.group(2).strip()
+        # 尝试解析值
+        try:
+            val = json.loads(val_str)
+        except json.JSONDecodeError:
+            # 去掉首尾引号当作字符串
+            if val_str.startswith('"') and val_str.endswith('"'):
+                val = val_str[1:-1]
+            else:
+                val = val_str
+        # 同名 key 只取第一个
+        if key not in result:
+            result[key] = val
+    return result
+
+
+# ===================== LLM 调用封装 =====================
 
 try:
     from openai import OpenAI
@@ -77,22 +227,7 @@ def generate_topics(hot_topics: List[Dict[str, Any]], count: int = None) -> List
            f"\n\n请从中挑选 {count} 个最适合做冷知识科普的，按上述格式输出 JSON 数组。"
 
     raw = _chat(system, user, temperature=0.85)
-
-    # 容错：LLM 可能包 ```json ... ``` 或带多余文字
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    try:
-        topics = json.loads(raw)
-    except json.JSONDecodeError:
-        # 尝试找第一个 [ 到最后一个 ]
-        start, end = raw.find("["), raw.rfind("]")
-        if start >= 0 and end > start:
-            topics = json.loads(raw[start : end + 1])
-        else:
-            raise
+    topics = _robust_json_loads(raw, expect_type=list)
 
     print(f"[选题] 生成 {len(topics)} 个选题")
     for t in topics:
@@ -165,21 +300,7 @@ def generate_script(topic: Dict[str, Any]) -> Dict[str, Any]:
 要求：分镜数量 8-12 个，总时长接近 {target} 秒。"""
 
     raw = _chat(system, user, temperature=0.8)
-
-    # 容错解析
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    try:
-        script = json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}")
-        if start >= 0 and end > start:
-            script = json.loads(raw[start : end + 1])
-        else:
-            raise
+    script = _robust_json_loads(raw, expect_type=dict)
 
     print(f"[脚本] 生成 {len(script.get('shots', []))} 个分镜，总时长 {script.get('total_duration')}s")
     return script
@@ -239,21 +360,7 @@ BGM情绪：{script.get('bgm_mood', 'curious')}
 - 整体风格符合抖音冷知识爆款调性"""
 
     raw = _chat(system, user, temperature=0.85)
-
-    # 容错解析
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    try:
-        info = json.loads(raw)
-    except json.JSONDecodeError:
-        start, end = raw.find("{"), raw.rfind("}")
-        if start >= 0 and end > start:
-            info = json.loads(raw[start : end + 1])
-        else:
-            raise
+    info = _robust_json_loads(raw, expect_type=dict)
 
     # 安全校验：超长截断，话题数限制
     info["title"] = info.get("title", "")[:25]
