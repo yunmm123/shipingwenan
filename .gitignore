@@ -1,0 +1,16 @@
+# 敏感凭证
+.env
+
+# 运行产物
+output/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# 临时
+*.log
+*.tmp
