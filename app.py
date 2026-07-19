@@ -1,9 +1,9 @@
 """
-AI 冷知识视频生产线 - 网页版
-打开浏览器即用，无需命令行操作。
+B站叙事AI短片生产线 - 网页版
+热点 → 叙事短片剧本 → 角色设定卡 → 可灵提示词包 → 你用可灵生成视频 → 剪映成片
 
 部署：Streamlit Community Cloud（免费）
-使用：填入 API Key → 点按钮 → 下载成果
+使用：填入 API Key → 点按钮 → 下载拍摄指南 Word 文档
 """
 import os
 import sys
@@ -18,11 +18,10 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
-import requests
 
 # 页面配置
 st.set_page_config(
-    page_title="AI冷知识视频生产线",
+    page_title="B站叙事AI短片生产线",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -36,69 +35,58 @@ defaults = {
     'selected_topic_idx': None,
     'script': None,
     'publish_info': None,
-    'clips_map': None,
-    'clips_dir': None,
+    'character_cards': None,
+    'scene_cards': None,
+    'kling_groups': None,
     'current_step': 0,
+    'selected_genre': '科幻',
+    'selected_art_style': 'cinematic',
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
-# ============ 应用配置覆盖函数 ============
+# ============ API Key 清洗 ============
 def _sanitize_key(value: str) -> str:
-    """
-    清除 API Key 中的非 ASCII 字符。
-    用户从 Word/PDF/网页复制 Key 时，可能混入不可见特殊字符
-    （如 U+F0B7 项目符号、U+200B 零宽空格、U+FEFF BOM 等），
-    这些字符会导致 httpx 构造 HTTP 头时报 UnicodeEncodeError。
-    """
+    """清除 API Key 中的非 ASCII 字符（从 Word/PDF 复制时可能混入）。"""
     if not value:
         return value
-    # 去掉首尾空白
     cleaned = value.strip()
-    # 去掉零宽字符、BOM、软连字符
     invisible = {"\ufeff", "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u00ad"}
     for ch in invisible:
         cleaned = cleaned.replace(ch, "")
-    # 只保留 ASCII 可见字符
     return "".join(c for c in cleaned if 0x20 <= ord(c) <= 0x7E)
 
 
-def apply_keys_to_config(pixabay_key, llm_key, pexels_key):
+def apply_keys_to_config(llm_key):
     """把用户输入的 key 写入 config 模块和环境变量。"""
     import config
-    # 清除可能混入的非 ASCII 字符
-    pixabay_key = _sanitize_key(pixabay_key) if pixabay_key else ""
     llm_key = _sanitize_key(llm_key) if llm_key else ""
-    pexels_key = _sanitize_key(pexels_key) if pexels_key else ""
-
-    os.environ['PIXABAY_API_KEY'] = pixabay_key
-    os.environ['PEXELS_API_KEY'] = pexels_key or ''
     os.environ['LLM_API_KEY'] = llm_key
     os.environ['LLM_API_BASE'] = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
     os.environ['LLM_MODEL'] = 'qwen3.7-plus'
-    # config 模块用 os.getenv，需要重新加载
     import importlib
     importlib.reload(config)
     return config
 
 
-def apply_params_to_config(niche, target_duration, topic_count):
+def apply_params_to_config(genre, art_style, target_duration):
     import config
-    config.NICHE = niche
+    config.NICHE = "B站叙事AI短片"
     config.TARGET_DURATION = target_duration
-    config.TOPIC_COUNT = topic_count
+    if genre:
+        config.DEFAULT_GENRE = genre
     return config
 
 
 # ============ 顶部标题区 ============
 st.markdown("""
-<div style='background:linear-gradient(90deg,#667eea 0%,#764ba2 100%);
+<div style='background:linear-gradient(90deg,#00A1D6 0%,#0E5E8F 100%);
             padding:24px 32px;border-radius:16px;margin-bottom:24px;'>
-    <h1 style='color:white;margin:0;font-size:32px;'>🎬 AI 冷知识视频生产线</h1>
+    <h1 style='color:white;margin:0;font-size:32px;'>🎬 B站叙事AI短片生产线</h1>
     <p style='color:rgba(255,255,255,0.9);margin:8px 0 0 0;font-size:16px;'>
-        抓取今日热点 → AI 生成选题 → 写分镜脚本 → 下载 CC0 素材 → 你只管剪辑发布
+        抓取热点 → AI 写叙事剧本 → 生成角色设定卡 → 生成可灵提示词包 → 你用可灵生成视频 → 剪映成片
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -109,84 +97,93 @@ with st.sidebar:
     st.header("⚙️ API Key 配置")
     st.caption("Key 仅保存在本次会话，不会上传或落盘")
 
-    pixabay_key = st.text_input(
-        "Pixabay API Key *",
-        type="password",
-        help="必填。去 https://pixabay.com/api/docs/ 登录后即可看到"
-    )
     llm_key = st.text_input(
         "Qwen API Key *",
         type="password",
-        help="必填。阿里云百炼平台 https://bailian.console.aliyun.com/ 获取"
-    )
-    pexels_key = st.text_input(
-        "Pexels API Key（选填）",
-        type="password",
-        help="选填。留空时只用 Pixabay 单源，去 https://www.pexels.com/api/ 申请"
+        help="必填。阿里云百炼平台 https://bailian.console.aliyun.com/ 获取（通义千问+通义万相同一账号）"
     )
 
     if st.button("💾 保存配置", use_container_width=True, type="primary"):
-        if pixabay_key and llm_key:
-            # 检测并清除非 ASCII 字符
+        if llm_key:
             warnings = []
-            for name, key in [("Pixabay", pixabay_key), ("Qwen", llm_key), ("Pexels", pexels_key)]:
-                if key:
-                    clean = _sanitize_key(key)
-                    if len(clean) != len(key.strip()):
-                        removed = len(key.strip()) - len(clean)
-                        warnings.append(f"{name} Key 清除了 {removed} 个隐藏字符")
-            apply_keys_to_config(pixabay_key, llm_key, pexels_key)
+            clean = _sanitize_key(llm_key)
+            if len(clean) != len(llm_key.strip()):
+                removed = len(llm_key.strip()) - len(clean)
+                warnings.append(f"Qwen Key 清除了 {removed} 个隐藏字符")
+            apply_keys_to_config(llm_key)
             st.session_state.keys_configured = True
             st.success("✅ 配置已保存，可以开始使用了！")
             if warnings:
-                st.warning("⚠️ 检测到 Key 中含有非 ASCII 字符（可能是从 Word/PDF 复制时混入的），已自动清除：" + "；".join(warnings))
+                st.warning("⚠️ " + "；".join(warnings))
         else:
-            st.error("❌ 必填项未填：Pixabay 和 Qwen Key 都是必填的")
+            st.error("❌ 必填项未填：Qwen Key 是必填的")
 
     st.divider()
     st.header("🎛️ 参数设置")
-    niche = st.text_input("赛道定位", value="冷知识/万物原理")
-    target_duration = st.slider("视频目标时长（秒）", 120, 600, 240, 60)
-    topic_count = st.slider("候选选题数量", 1, 5, 3)
+    genre_options = ["科幻", "悬疑", "哲理", "奇幻", "都市", "恐怖"]
+    genre = st.selectbox("短片题材", genre_options, index=0)
+    st.session_state.selected_genre = genre
+
+    art_style_options = {
+        "cinematic": "电影感（推荐）",
+        "anime": "日系动画",
+        "realistic": "超写实",
+        "oil_painting": "油画风",
+        "watercolor": "水彩风",
+    }
+    art_style = st.selectbox(
+        "画面画风",
+        options=list(art_style_options.keys()),
+        format_func=lambda x: art_style_options[x],
+        index=0,
+    )
+    st.session_state.selected_art_style = art_style
+
+    target_duration = st.slider("短片目标时长（秒）", 120, 360, 240, 30)
 
     if st.button("💾 应用参数", use_container_width=True):
-        apply_params_to_config(niche, target_duration, topic_count)
+        apply_params_to_config(genre, art_style, target_duration)
         st.success("参数已应用")
 
     st.divider()
-    st.caption("📚 [使用教程](https://github.com/yunmm123/shipingwenan) | 部署于 Streamlit Cloud")
+    st.caption("📚 [使用教程](https://github.com/yunmm123/shipingwenan)")
 
 
 # ============ 主区域：未配置时显示引导 ============
 if not st.session_state.keys_configured:
-    st.info("👈 请先在左侧侧边栏配置 API Key（至少填 Pixabay 和 Qwen 两个）")
+    st.info("👈 请先在左侧侧边栏配置 Qwen API Key")
     st.markdown("""
-    ### 📖 使用流程
-    
-    1. **配置 Key**：左侧填入 Pixabay 和 Qwen 的 API Key，点保存
-    2. **抓取热点**：点按钮，自动抓取抖音/微博/知乎等平台热榜
-    3. **生成选题**：AI 把热点转成"反常识钩子"冷知识选题
-    4. **生成脚本**：选一个选题，AI 写出分镜脚本（分镜数由选题复杂度决定）
-    5. **下载素材**：自动从 Pexels/Pixabay 下载 CC0 视频素材，并根据素材时长动态调整脚本
-    6. **下载交付包**：一键打包 Word 文档+素材+剪辑建议，拖进剪映即可剪辑发布
-    
-    ### 🆕 本次更新亮点
-    
-    | 功能 | 说明 |
-    |------|------|
-    | 动态分镜数 | AI 根据选题复杂度自行决定 6-15 个分镜，不再固定 |
-    | 文案匹配时长 | 解说文案严格按 4字/秒 匹配分镜时长，不出现错位 |
-    | 素材动态调整 | 下载素材后根据实际时长调整脚本，给出裁剪/慢放建议 |
-    | 剪辑建议 | 每个分镜都有专属剪辑建议（截取/转场/特效/节奏） |
-    | Word 文档输出 | 交付包改为 .docx 格式，Word/WPS 直接打开 |
-    
+    ### 📖 工作流程
+
+    1. **配置 Key**：左侧填入 Qwen API Key，点保存
+    2. **抓取热点**：自动抓取多平台热榜
+    3. **生成选题**：AI 把热点转成叙事短片构思（有主角、冲突、反转）
+    4. **生成剧本**：AI 写出完整三幕剧剧本（角色、场景、分镜）
+    5. **生成角色卡**：AI 生成角色设定卡绘画提示词（你拿去通义万相生成立绘）
+    6. **生成可灵提示词包**：AI 把镜头转成可灵提示词，按场景分组
+    7. **下载拍摄指南**：一键打包 Word 文档（剧本+角色卡+可灵提示词+发布文案）
+
+    ### 🎬 你拿到拍摄指南后要做的
+
+    1. 用角色卡提示词去通义万相生成主角立绘（免费）
+    2. 用场景卡提示词去通义万相生成场景九宫格（免费）
+    3. 去可灵 AI (https://klingai.com) 上传角色参考图
+    4. 按拍摄指南的分组，复制提示词到可灵生成视频（每日66免费灵感值）
+    5. 下载所有视频片段，用剪映拼接+配音+字幕
+    6. 发布到 B站
+
     ### 🔑 没有 Key？
-    
+
     | Key | 免费获取地址 | 说明 |
     |-----|------------|------|
-    | Pixabay | https://pixabay.com/accounts/register/ | 注册后访问 /api/docs/ 直接看到 |
-    | Qwen | https://bailian.console.aliyun.com/ | 阿里云百炼，注册送额度 |
-    | Pexels | https://www.pexels.com/api/ | 选填，可作为第二素材源 |
+    | Qwen | https://bailian.console.aliyun.com/ | 阿里云百炼，注册送额度，通义千问+通义万相同用 |
+    | 可灵 | https://klingai.com | 注册即每日66灵感值，无需Key |
+
+    ### 🆚 为什么从抖音转B站？
+
+    - 抖音对AI内容强制标识+限流，完播率仅15-25%
+    - B站1.9亿月活用户主动关注AI内容，官方UpDream工具扶持
+    - B站用户审美要求高，但接受AI短片，只要叙事好就能火
     """)
     st.stop()
 
@@ -194,15 +191,15 @@ if not st.session_state.keys_configured:
 # ============ 主区域：工作流 ============
 # 步骤进度条
 st.markdown("### 📊 进度")
-step_cols = st.columns(5)
-steps = ["抓热点", "生成选题", "选选题", "写脚本", "下素材"]
+step_cols = st.columns(6)
+steps = ["抓热点", "生成选题", "写剧本", "角色卡", "可灵包", "下载"]
 for i, (col, name) in enumerate(zip(step_cols, steps)):
     with col:
         if st.session_state.current_step > i:
             color = "green"
             icon = "✅"
         elif st.session_state.current_step == i:
-            color = "blue"
+            color = "#00A1D6"
             icon = "🔄"
         else:
             color = "gray"
@@ -249,11 +246,11 @@ with col2:
 
 
 # ============ Step 2: AI 生成选题 ============
-st.header("💡 步骤 2：AI 生成冷知识选题")
+st.header("💡 步骤 2：AI 生成叙事短片选题")
 
 if st.session_state.hot_topics_data:
     if st.button("🤖 AI 生成选题", use_container_width=False, type="primary"):
-        with st.spinner("AI 正在把热点转成冷知识选题（约 20-40 秒）..."):
+        with st.spinner("AI 正在把热点转成叙事短片构思（约 20-40 秒）..."):
             try:
                 import script_generator
                 import hot_topics
@@ -261,7 +258,7 @@ if st.session_state.hot_topics_data:
                 importlib.reload(script_generator)
                 importlib.reload(hot_topics)
                 filtered = hot_topics.keyword_filter(st.session_state.hot_topics_data['topics'])
-                topics = script_generator.generate_topics(filtered, count=topic_count)
+                topics = script_generator.generate_topics(filtered, count=3)
                 st.session_state.topics = topics
                 st.session_state.selected_topic_idx = None
                 st.session_state.current_step = 2
@@ -278,12 +275,13 @@ if st.session_state.topics:
     st.subheader("📋 候选选题列表")
     for i, t in enumerate(st.session_state.topics):
         title = t.get('title', f'选题{i+1}')
-        with st.expander(f"选题 {i+1}：{title}", expanded=(i == 0)):
+        with st.expander(f"选题 {i+1}：{title} ｜ {t.get('genre','科幻')}", expanded=(i == 0)):
             cols = st.columns([3, 1])
             with cols[0]:
+                st.write(f"**🎬 题材**：{t.get('genre','')}")
+                st.write(f"**🎭 故事前提**：{t.get('premise','')}")
                 st.write(f"**🎯 钩子**：{t.get('hook','')}")
-                st.write(f"**🔬 切入角度**：{t.get('angle','')}")
-                st.write(f"**🏷️ 关键词**：{', '.join(t.get('science_keywords',[]))}")
+                st.write(f"**📐 切入角度**：{t.get('angle','')}")
                 st.write(f"**⏱️ 预计时长**：{t.get('duration_estimate','')} 秒")
                 st.write(f"**🔥 来源热点**：{t.get('hot_source','')}")
             with cols[1]:
@@ -294,15 +292,15 @@ if st.session_state.topics:
                     st.rerun()
 
 
-# ============ Step 3: 生成脚本 ============
-st.header("📝 步骤 3：生成分镜脚本")
+# ============ Step 3: 生成剧本 ============
+st.header("📝 步骤 3：生成叙事短片剧本")
 
 if st.session_state.topics and st.session_state.selected_topic_idx is not None:
     selected = st.session_state.topics[st.session_state.selected_topic_idx]
-    st.info(f"当前选题：**{selected.get('title','')}**")
+    st.info(f"当前选题：**{selected.get('title','')}** ｜ 题材：{selected.get('genre', st.session_state.selected_genre)}")
 
-    if st.button("🎬 AI 生成分镜脚本", use_container_width=False, type="primary"):
-        with st.spinner("AI 正在写完整分镜脚本（约 30-60 秒）..."):
+    if st.button("🎬 AI 生成完整剧本", use_container_width=False, type="primary"):
+        with st.spinner("AI 正在写三幕剧剧本（约 30-60 秒）..."):
             try:
                 import script_generator
                 import importlib
@@ -310,12 +308,12 @@ if st.session_state.topics and st.session_state.selected_topic_idx is not None:
                 script = script_generator.generate_script(selected)
                 st.session_state.script = script
                 st.session_state.current_step = 4
-                st.success(f"✅ 生成 {len(script.get('shots',[]))} 个分镜")
+                st.success(f"✅ 剧本生成：{len(script.get('shots',[]))} 个镜头，{len(script.get('scenes',[]))} 个场景，{len(script.get('characters',[]))} 个角色")
                 # 同步生成发布文案
                 try:
                     publish_info = script_generator.generate_publish_info(selected, script)
                     st.session_state.publish_info = publish_info
-                    st.success("✅ 发布文案已生成")
+                    st.success("✅ B站发布文案已生成")
                 except Exception as pe:
                     st.warning(f"发布文案生成失败：{pe}")
             except Exception as e:
@@ -327,296 +325,339 @@ else:
     st.info("请先完成步骤 2")
 
 
-# 展示脚本
+# 展示剧本
 if st.session_state.script:
     script = st.session_state.script
-    st.subheader(f"📋 {script.get('title','分镜脚本')}")
+    st.subheader(f"📋 {script.get('title','叙事短片剧本')}")
 
     # 元信息
     meta_cols = st.columns(5)
-    meta_cols[0].metric("计划时长", f"{script.get('total_duration','?')}秒")
-    if script.get('actual_total_duration'):
-        meta_cols[1].metric("实际时长", f"{script.get('actual_total_duration')}秒", delta=f"{script.get('duration_diff',0):+d}秒")
-    else:
-        meta_cols[1].metric("分镜数", len(script.get('shots',[])))
-    meta_cols[2].metric("分镜数", len(script.get('shots',[])))
-    meta_cols[3].metric("BGM 情绪", script.get('bgm_mood','curious'))
-    meta_cols[4].metric("赛道", niche)
+    meta_cols[0].metric("总时长", f"{script.get('total_duration','?')}秒")
+    meta_cols[1].metric("镜头数", len(script.get('shots',[])))
+    meta_cols[2].metric("场景数", len(script.get('scenes',[])))
+    meta_cols[3].metric("角色数", len(script.get('characters',[])))
+    meta_cols[4].metric("题材", script.get('genre','?'))
 
-    # 完整解说文案
-    st.subheader("🎙️ 完整解说文案（可直接复制到剪映 AI 配音）")
-    narration = script.get('narration_full', '')
+    # 角色设定
+    if script.get('characters'):
+        st.subheader("👥 角色设定")
+        for char in script['characters']:
+            with st.expander(f"{char.get('name','?')}（{char.get('role','?')}）", expanded=False):
+                st.write(f"**外貌**：{char.get('appearance','')}")
+                st.write(f"**性格**：{char.get('personality','')}")
+                st.write(f"**声音**：{char.get('voice','')}")
+
+    # 场景设定
+    if script.get('scenes'):
+        st.subheader("🏞️ 场景设定")
+        for scene in script['scenes']:
+            with st.expander(f"场景{scene.get('id','?')}：{scene.get('name','')} ｜ {scene.get('location','')}", expanded=False):
+                st.write(f"**时间**：{scene.get('time_of_day','')}")
+                st.write(f"**天气/氛围**：{scene.get('weather','')}")
+                st.write(f"**视觉描述**：{scene.get('description','')}")
+
+    # 完整旁白
+    st.subheader("🎙️ 完整旁白/对话（可直接复制到剪映 AI 配音）")
     st.text_area(
         "点击右下角复制按钮即可复制",
-        value=narration,
+        value=script.get('narration_full', ''),
         height=220,
         key="narration_display",
     )
 
-    # 分镜表（含剪辑建议）
-    st.subheader("🎬 分镜详情（含剪辑建议）")
+    # 分镜表
+    st.subheader("🎬 分镜详情")
     for shot in script.get('shots', []):
-        # 如果有实际时长信息，显示在标题中
-        if shot.get('actual_duration'):
-            header = f"分镜 {shot['index']} ｜ 计划{shot.get('duration','?')}s → 实际{shot.get('actual_duration','?')}s ｜ 素材{shot.get('clip_duration','无')}s ｜ {shot.get('visual_note','')[:25]}"
-        else:
-            header = f"分镜 {shot['index']} ｜ {shot.get('duration','?')}秒 ｜ {shot.get('visual_note','')[:30]}"
-        with st.expander(header, expanded=False):
+        with st.expander(
+            f"分镜 {shot['index']} ｜ 场景{shot.get('scene_id','?')} ｜ {shot.get('duration','?')}秒 ｜ {shot.get('visual_description','')[:30]}",
+            expanded=False,
+        ):
             sc = st.columns([2, 1])
             with sc[0]:
-                st.write(f"**🎤 解说词**（{len(shot.get('narration',''))}字，约{len(shot.get('narration',''))/4:.1f}秒）：")
+                st.write(f"**🎤 旁白/对话**（{len(shot.get('narration',''))}字）：")
                 st.write(shot.get('narration', ''))
-                st.write(f"**🎬 剪辑建议**：")
-                st.info(shot.get('editing_tip', '无'))
+                st.write(f"**📷 镜头运动**：{shot.get('camera_movement','')}")
             with sc[1]:
-                st.write(f"**🖼️ 画面建议**：")
-                st.write(shot.get('visual_note', ''))
-                st.write(f"**🔍 搜索关键词**：")
-                st.write(", ".join(shot.get('keywords', [])))
-                # 如果有调整建议，显示
-                if shot.get('adjust_tip'):
-                    st.write(f"**🔧 素材调整建议**：")
-                    st.warning(shot.get('adjust_tip', ''))
+                st.write(f"**🎬 画面描述**：")
+                st.write(shot.get('visual_description', ''))
+                st.write(f"**🎭 角色动作**：")
+                st.write(shot.get('character_action', ''))
+                st.write(f"**💧 情绪**：{shot.get('mood','')}")
 
 
-# ============ Step 3.5: 生成发布文案 ============
-st.header("📣 步骤 3.5：生成抖音发布文案")
+# ============ Step 4: 生成角色设定卡 ============
+st.header("🎨 步骤 4：生成角色设定卡和场景卡")
 
 if st.session_state.script:
-    if st.button("✍️ AI 生成发布文案（标题/描述/话题）", use_container_width=False, type="primary"):
-        with st.spinner("AI 正在写发布文案（约 15-30 秒）..."):
+    st.info(f"""
+    📐 将为 {len(st.session_state.script.get('characters',[]))} 个角色和 {len(st.session_state.script.get('scenes',[]))} 个场景生成设定卡绘画提示词。
+    画风：**{st.session_state.selected_art_style}**
+    你拿到提示词后去通义万相生成图片，作为可灵AI的主体参考图。
+    """)
+
+    if st.button("🎨 生成角色卡和场景卡", use_container_width=False, type="primary"):
+        with st.spinner("AI 正在生成设定卡绘画提示词（约 20-40 秒）..."):
             try:
-                import script_generator
+                import character_designer
                 import importlib
-                importlib.reload(script_generator)
-                selected = st.session_state.topics[st.session_state.selected_topic_idx]
-                publish_info = script_generator.generate_publish_info(selected, st.session_state.script)
-                st.session_state.publish_info = publish_info
-                st.success("✅ 发布文案已生成，可打包下载")
-                st.rerun()
+                importlib.reload(character_designer)
+                art_style = st.session_state.selected_art_style
+                char_cards = character_designer.generate_character_cards(
+                    st.session_state.script.get('characters', []),
+                    art_style=art_style,
+                )
+                scene_cards = character_designer.generate_scene_cards(
+                    st.session_state.script.get('scenes', []),
+                    art_style=art_style,
+                )
+                st.session_state.character_cards = char_cards
+                st.session_state.scene_cards = scene_cards
+                st.session_state.current_step = 5
+                st.success(f"✅ 生成 {len(char_cards)} 个角色卡 + {len(scene_cards)} 个场景卡")
             except Exception as e:
                 st.error(f"生成失败：{e}")
                 st.exception(e)
-elif st.session_state.topics:
-    st.info("请先生成分镜脚本")
+
+    # 展示角色卡
+    if st.session_state.character_cards:
+        st.subheader("👥 角色设定卡")
+        for card in st.session_state.character_cards:
+            with st.expander(f"{card.get('name','?')}（{card.get('role','?')}）设定卡", expanded=False):
+                st.write(f"**主色调**：{card.get('color_palette','')}")
+                st.write("**正面半身像提示词**（作为可灵主体参考图）：")
+                st.code(card.get('portrait_prompt', ''), language='text')
+                st.write("**三视图设定卡提示词**：")
+                st.code(card.get('card_prompt', ''), language='text')
+                if card.get('expression_prompts'):
+                    st.write("**表情提示词**：")
+                    for exp in card['expression_prompts']:
+                        st.code(exp, language='text')
+
+    # 展示场景卡
+    if st.session_state.scene_cards:
+        st.subheader("🏞️ 场景九宫格卡")
+        for card in st.session_state.scene_cards:
+            with st.expander(f"场景{card.get('scene_id','?')}：{card.get('scene_name','')} 九宫格", expanded=False):
+                st.write(f"**主色调**：{card.get('color_palette','')}")
+                st.write("**九宫格提示词**（9个视角锁死空间结构）：")
+                st.code(card.get('grid_prompt', ''), language='text')
+                st.write("**全景图提示词**：")
+                st.code(card.get('wide_shot_prompt', ''), language='text')
 else:
-    st.info("请先完成步骤 3")
+    st.info("请先完成步骤 3 生成剧本")
 
 
-# ============ 发布文案展示 ============
-if st.session_state.publish_info:
-    publish_info = st.session_state.publish_info
-    st.subheader("📣 发布文案（剪完直接用）")
-
-    # 用三列展示核心信息
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        st.metric("标题字数", f"{len(publish_info.get('title',''))}/25")
-    with p2:
-        st.metric("描述字数", f"{len(publish_info.get('description',''))}/200")
-    with p3:
-        st.metric("话题数", f"{len(publish_info.get('hashtags',[]))}/5")
-
-    with st.expander("📋 查看完整发布文案（点击展开复制）", expanded=True):
-        st.write(f"**📌 作品标题**")
-        st.code(publish_info.get('title', ''), language='text')
-
-        st.write(f"**📝 作品描述**")
-        st.code(publish_info.get('description', ''), language='text')
-
-        st.write(f"**🏷️ 相关话题**")
-        st.code(" ".join(publish_info.get('hashtags', [])), language='text')
-
-        st.write(f"**🖼️ 封面建议**：{publish_info.get('cover_suggestion', '')}")
-        st.write(f"**💡 发布建议**：{publish_info.get('publish_tips', '')}")
-
-
-
-# ============ Step 4: 下载素材 + 打包 ============
-st.header("🎥 步骤 4：下载 CC0 素材并打包")
-
-st.info("""
-🔒 **素材合规自动过滤已启用**：下载时会自动过滤以下不合规素材，遵守 Pexels/Pixabay 内容使用条款：
-- ✗ 含可识别商标/品牌/标志的素材（不得用于商业目的）
-- ✗ 涉及可识别人物的素材（肖像权风险）
-- ✗ 可能涉及误导/欺骗性的素材（如虚假医疗宣传）
-- ✗ 下载的素材仅用于二次创作发布，不得单独销售或作为商标使用
-""")
+# ============ Step 5: 生成可灵提示词包 ============
+st.header("🎥 步骤 5：生成可灵AI提示词包")
 
 if st.session_state.script:
-    col_dl, col_pkg = st.columns(2)
+    st.info("""
+    🔒 可灵3.0提示词包会把镜头按场景分组，每组3-4个镜头连续生成。
+    - 同一场景的镜头一次性生成，保持角色和场景一致性
+    - 每组消耗约10灵感值，每日66灵感值（约6组）
+    - 你需要在可灵上传角色参考图作为"主体参考"
+    """)
 
-    with col_dl:
-        if st.button("⬇️ 下载 CC0 视频素材", use_container_width=True, type="primary"):
-            with st.spinner("正在并发下载素材（约 1-2 分钟）..."):
-                try:
-                    import stock_api
-                    import importlib
-                    importlib.reload(stock_api)
-                    clips_dir = Path(tempfile.gettempdir()) / f"clips_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    clips_map = stock_api.fetch_all_clips(
-                        st.session_state.script['shots'],
-                        clips_dir,
-                    )
-                    st.session_state.clips_map = clips_map
-                    st.session_state.clips_dir = clips_dir
-                    success = sum(1 for v in clips_map.values() if v)
-                    total = len(st.session_state.script['shots'])
-                    st.session_state.current_step = 5
+    if st.button("🎥 生成可灵提示词包", use_container_width=False, type="primary"):
+        with st.spinner("正在生成可灵提示词包..."):
+            try:
+                import kling_prompter
+                import importlib
+                importlib.reload(kling_prompter)
+                shot_groups = kling_prompter.generate_kling_shot_groups(
+                    st.session_state.script.get('shots', []),
+                    st.session_state.script.get('characters', []),
+                )
+                st.session_state.kling_groups = shot_groups
+                st.session_state.current_step = 6
+                total_groups = len(shot_groups)
+                total_cost = sum(g.get('estimated_cost', 10) for g in shot_groups)
+                days = (total_cost + 65) // 66  # 向上取整
+                st.success(f"✅ 生成 {total_groups} 个镜头组，预计消耗 {total_cost} 灵感值，免费额度约需 {days} 天")
+            except Exception as e:
+                st.error(f"生成失败：{e}")
+                st.exception(e)
 
-                    # 根据实际素材动态调整脚本时长
-                    try:
-                        import script_generator
-                        importlib.reload(script_generator)
-                        st.session_state.script = script_generator.adjust_script_to_clips(
-                            st.session_state.script, clips_map
-                        )
-                        actual_dur = st.session_state.script.get('actual_total_duration', '?')
-                        planned_dur = st.session_state.script.get('planned_total_duration', '?')
-                        diff = st.session_state.script.get('duration_diff', 0)
-                        st.success(f"✅ {success}/{total} 个分镜抓到素材｜计划{planned_dur}s → 实际{actual_dur}s（{diff:+d}s）")
-                        st.info("📐 脚本已根据实际素材时长动态调整，请查看各分镜的「素材调整建议」")
-                    except Exception as adj_e:
-                        st.warning(f"素材调整失败（不影响下载）：{adj_e}")
-                        st.success(f"✅ {success}/{total} 个分镜抓到素材")
-                except Exception as e:
-                    st.error(f"下载失败：{e}")
-                    st.exception(e)
+    # 展示镜头组
+    if st.session_state.kling_groups:
+        st.subheader("📋 可灵拍摄指南")
+        total_cost = sum(g.get('estimated_cost', 10) for g in st.session_state.kling_groups)
+        st.write(f"**总览**：{len(st.session_state.kling_groups)} 组 ｜ 预计 {total_cost} 灵感值 ｜ 每日66点约需 {(total_cost+65)//66} 天")
 
-    # 显示下载结果
-    if st.session_state.clips_map:
-        with st.expander(f"📊 素材下载情况（共 {len(st.session_state.clips_map)} 个分镜）"):
-            for idx, clips in sorted(st.session_state.clips_map.items()):
-                if clips:
-                    c = clips[0]
-                    st.write(f"✅ 分镜 {idx}: [{c['source']}] {c['width']}x{c['height']} {c.get('duration','?')}s")
-                else:
-                    st.write(f"❌ 分镜 {idx}: 未抓到（可手动去网站搜）")
-
-    # 打包下载
-    with col_pkg:
-        if st.session_state.clips_map is not None:
-            if st.button("📦 打包下载完整交付包", use_container_width=True, type="primary"):
-                with st.spinner("正在打包（生成 Word 文档 + 素材）..."):
-                    try:
-                        import script_generator
-                        import importlib
-                        importlib.reload(script_generator)
-                        selected = st.session_state.topics[st.session_state.selected_topic_idx]
-
-                        # 生成 Word 文档（分镜脚本）
-                        script_docx_buf = script_generator.script_to_docx(
-                            selected,
-                            st.session_state.script,
-                            st.session_state.clips_map,
-                        )
-
-                        # 生成 manifest.csv
-                        import csv
-                        csv_buf = io.StringIO()
-                        writer = csv.writer(csv_buf)
-                        writer.writerow(["分镜序号", "计划时长", "实际时长", "素材时长", "素材文件名", "素材来源", "画面建议", "剪辑建议", "素材调整建议"])
-                        for shot in st.session_state.script.get('shots', []):
-                            idx = shot['index']
-                            clips = st.session_state.clips_map.get(idx, [])
-                            filename = ""
-                            source = ""
-                            if clips and 'local_path' in clips[0]:
-                                filename = os.path.basename(clips[0]['local_path'])
-                                source = clips[0]['source']
-                            writer.writerow([
-                                idx,
-                                shot.get('duration',''),
-                                shot.get('actual_duration', shot.get('duration','')),
-                                shot.get('clip_duration', ''),
-                                filename, source,
-                                shot.get('visual_note','')[:50],
-                                shot.get('editing_tip','')[:80],
-                                shot.get('adjust_tip','')[:80],
-                            ])
-
-                        # BGM 推荐
-                        import stock_api
-                        import importlib
-                        importlib.reload(stock_api)
-                        bgm_mood = st.session_state.script.get('bgm_mood', 'curious')
-                        bgm_recs = stock_api.recommend_bgm(bgm_mood)
-
-                        # 创建 zip
-                        zip_buf = io.BytesIO()
-                        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                            # Word 文档（主交付格式）
-                            zf.writestr("分镜脚本.docx", script_docx_buf.getvalue())
-
-                            # JSON 结构化数据（备用）
-                            zf.writestr("script.json", json.dumps(st.session_state.script, ensure_ascii=False, indent=2))
-
-                            # 发布文案（Word 文档）
-                            if st.session_state.publish_info:
-                                publish_info = st.session_state.publish_info
-                                publish_docx_buf = script_generator.publish_info_to_docx(publish_info)
-                                zf.writestr("发布文案.docx", publish_docx_buf.getvalue())
-                                zf.writestr("publish_info.json", json.dumps(publish_info, ensure_ascii=False, indent=2))
-
-                            zf.writestr("manifest.csv", csv_buf.getvalue())
-                            zf.writestr("bgm_suggestions.json", json.dumps({
-                                "mood": bgm_mood,
-                                "sources": bgm_recs,
-                            }, ensure_ascii=False, indent=2))
-
-                            # 快速开始说明
-                            has_publish = "✅" if st.session_state.publish_info else "❌"
-                            zf.writestr("快速开始.txt", f"""打包内容（Word 文档格式）：
-- 分镜脚本.docx       分镜脚本（含剪辑建议、素材调整建议）✅
-- 发布文案.docx       发布文案（标题/描述/话题，含复制清单）{has_publish}
-- script.json         脚本结构化数据（备用）
-- publish_info.json   发布文案结构化数据（备用）
-- manifest.csv        剪辑清单（分镜对应哪个素材+剪辑建议）
-- bgm_suggestions.json  配乐推荐
-- clips/              已下载的 CC0 视频素材
-
-【脚本说明】
-- 分镜数量由选题复杂度决定（不固定）
-- 解说文案字数严格匹配分镜时长（4字/秒）
-- 下载素材后已根据实际时长动态调整，请看「素材调整建议」列
-
-【剪辑阶段】
-1. 打开「分镜脚本.docx」，查看每个分镜的剪辑建议
-2. 打开剪映，把 clips/ 里的视频按 manifest.csv 顺序拖进去
-3. 把脚本中的「完整解说文案」复制到剪映文本 → 智能配音
-4. 按每个分镜的「剪辑建议」处理素材（截取/慢放/转场等）
-5. 按「素材调整建议」处理文案与素材的时长差异
-6. 按 bgm_suggestions.json 推荐下配乐
-7. 字幕用思源黑体，加关键词高亮
-8. 导出 1080p 横屏
-
-【发布阶段】
-9. 打开「发布文案.docx」，复制标题、描述、话题
-10. 按封面建议做封面，按发布建议选时机
-11. 发布到抖音
-""") 
-                            # 添加视频文件
-                            for idx, clips in st.session_state.clips_map.items():
-                                for clip in clips:
-                                    if 'local_path' in clip and os.path.exists(clip['local_path']):
-                                        arcname = f"clips/{os.path.basename(clip['local_path'])}"
-                                        zf.write(clip['local_path'], arcname)
-
-                        zip_buf.seek(0)
-                        date_str = datetime.now().strftime('%Y%m%d')
-                        st.download_button(
-                            label="📥 下载交付包 ZIP",
-                            data=zip_buf,
-                            file_name=f"交付包_{date_str}.zip",
-                            mime="application/zip",
-                            use_container_width=True,
-                        )
-                        st.success("✅ 打包完成，点击上方按钮下载（Word 文档格式）")
-                    except Exception as e:
-                        st.error(f"打包失败：{e}")
-                        st.exception(e)
+        for group in st.session_state.kling_groups:
+            with st.expander(
+                f"组{group.get('group_id','?')}：{group.get('scene_name','')} ｜ {len(group.get('shots',[]))}镜头 ｜ {group.get('estimated_cost',10)}灵感值",
+                expanded=False,
+            ):
+                # 镜头列表
+                for shot in group.get('shots', []):
+                    st.write(f"- 镜头{shot.get('index','?')}（{shot.get('duration','?')}s）：{shot.get('visual_description','')[:50]}")
+                # 需要的角色参考图
+                if group.get('character_refs'):
+                    st.write(f"**需要上传的角色参考图**：{', '.join(group['character_refs'])}")
+                # 合并提示词
+                st.write("**合并提示词**（复制到可灵）：")
+                st.code(group.get('combined_prompt', ''), language='text')
+                # 操作建议
+                if group.get('tips'):
+                    st.info(group['tips'])
 else:
-    st.info("请先完成步骤 3 生成脚本")
+    st.info("请先完成步骤 3 生成剧本")
+
+
+# ============ Step 6: 打包下载 ============
+st.header("📦 步骤 6：下载完整拍摄指南")
+
+if st.session_state.script:
+    if st.button("📦 打包下载完整拍摄指南", use_container_width=True, type="primary"):
+        with st.spinner("正在打包 Word 文档..."):
+            try:
+                import script_generator
+                import character_designer
+                import kling_prompter
+                import importlib
+                importlib.reload(script_generator)
+                importlib.reload(character_designer)
+                importlib.reload(kling_prompter)
+
+                selected = st.session_state.topics[st.session_state.selected_topic_idx]
+                script = st.session_state.script
+
+                # 创建 zip
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    # 1. 剧本 Word 文档
+                    script_docx = script_generator.script_to_docx(selected, script)
+                    zf.writestr("1_剧本.docx", script_docx.getvalue())
+
+                    # 2. 角色卡和场景卡 Word 文档
+                    if st.session_state.character_cards or st.session_state.scene_cards:
+                        cards_docx = character_designer.cards_to_docx(
+                            st.session_state.character_cards or [],
+                            st.session_state.scene_cards or [],
+                            script.get('title', ''),
+                        )
+                        zf.writestr("2_角色场景设定卡.docx", cards_docx.getvalue())
+
+                    # 3. 可灵提示词包 Word 文档
+                    if st.session_state.kling_groups:
+                        kling_docx = kling_prompter.kling_package_to_docx(
+                            st.session_state.kling_groups,
+                            script.get('title', ''),
+                            len(script.get('shots', [])),
+                        )
+                        zf.writestr("3_可灵拍摄指南.docx", kling_docx.getvalue())
+
+                    # 4. B站发布文案 Word 文档
+                    if st.session_state.publish_info:
+                        publish_docx = script_generator.publish_info_to_docx(st.session_state.publish_info)
+                        zf.writestr("4_B站发布文案.docx", publish_docx.getvalue())
+
+                    # 5. JSON 结构化数据（备用）
+                    zf.writestr("script.json", json.dumps(script, ensure_ascii=False, indent=2))
+                    if st.session_state.publish_info:
+                        zf.writestr("publish_info.json", json.dumps(st.session_state.publish_info, ensure_ascii=False, indent=2))
+
+                    # 6. 快速开始说明
+                    has_cards = "✅" if st.session_state.character_cards else "❌"
+                    has_kling = "✅" if st.session_state.kling_groups else "❌"
+                    has_publish = "✅" if st.session_state.publish_info else "❌"
+                    total_shots = len(script.get('shots', []))
+                    total_groups = len(st.session_state.kling_groups or [])
+                    total_cost = sum(g.get('estimated_cost', 10) for g in (st.session_state.kling_groups or []))
+                    days = (total_cost + 65) // 66 if total_cost > 0 else 0
+
+                    zf.writestr("0_快速开始.txt", f"""B站叙事AI短片 - 完整拍摄指南
+============================================
+
+打包内容（Word 文档格式）：
+- 1_剧本.docx              完整三幕剧剧本（角色/场景/分镜）✅
+- 2_角色场景设定卡.docx     角色立绘+场景九宫格的绘画提示词 {has_cards}
+- 3_可灵拍摄指南.docx       可灵AI提示词包（按场景分组）{has_kling}
+- 4_B站发布文案.docx        标题/简介/标签/分区 {has_publish}
+- script.json              剧本结构化数据（备用）
+- publish_info.json        发布文案结构化数据（备用）
+
+数据概览：
+- 总镜头数：{total_shots}
+- 可灵分组数：{total_groups}
+- 预计灵感值：{total_cost}（每日66免费额度，约需{days}天）
+
+============================================
+完整操作流程（按顺序执行）
+============================================
+
+【第一阶段：生成角色和场景参考图】（用通义万相，免费）
+1. 打开 https://tongwan.aliyun.com/ （通义万相，用阿里云账号登录）
+2. 打开「2_角色场景设定卡.docx」
+3. 复制每个角色的"正面半身像提示词"到通义万相生成图片
+   → 这张图将作为可灵的"主体参考图"，务必清晰
+4. 复制每个角色的"三视图设定卡提示词"生成设定卡（备用）
+5. 复制每个场景的"九宫格提示词"生成场景参考图
+   → 这张图用于锁死空间结构，避免不同镜头场景不一致
+
+【第二阶段：用可灵生成视频】（https://klingai.com，每日66免费灵感值）
+6. 打开可灵 AI，注册登录
+7. 上传主角的正面半身像作为"主体参考"
+8. 打开「3_可灵拍摄指南.docx」
+9. 按分组顺序，复制每组的"合并提示词"到可灵
+10. 选择"多镜头连续生成"模式（同一场景的3-4个镜头一次生成）
+11. 每组消耗约10灵感值，每日66点约可生成6组
+12. 超出额度等次日继续，或开黄金会员（46元/月）
+13. 下载所有生成的视频片段
+
+【第三阶段：剪辑成片】（用剪映，免费）
+14. 打开剪映，把所有视频片段按镜头序号拖进去
+15. 打开「1_剧本.docx」，复制"完整旁白/对话"到剪映文本
+16. 用剪映"智能配音"生成AI配音
+17. 加字幕（思源黑体），关键词高亮
+18. 按"镜头运动"列添加转场效果
+19. 加BGM（按剧本bgm_mood标签去免费音乐站找）
+20. 导出 1080p
+
+【第四阶段：发布到B站】
+21. 打开「4_B站发布文案.docx」
+22. 复制标题、简介、标签
+23. 按分区推荐选择B站分区
+24. 上传视频，填写发布信息
+25. 发布
+
+============================================
+常见问题
+============================================
+
+Q: 角色不一致怎么办？
+A: 确保所有镜头都上传同一张主角参考图作为"主体参考"。
+   可灵3.0的主体一致性>96%，但必须每批都上传参考图。
+
+Q: 场景不一致怎么办？
+A: 先用九宫格提示词生成场景参考图，在可灵生成时描述同一场景。
+   同一场景的镜头用"多镜头连续生成"模式一次生成。
+
+Q: 免费额度不够怎么办？
+A: 每日66灵感值约生成6组。一条3分钟短片约需{total_groups}组，
+   免费约需{days}天完成。急的话开黄金会员46元/月。
+
+Q: 可以商用吗？
+A: 可灵生成的视频内容，普通用户可用于个人创作发布。
+   商业用途建议查看可灵最新授权条款。
+""")
+
+                zip_buf.seek(0)
+                date_str = datetime.now().strftime('%Y%m%d')
+                st.download_button(
+                    label="📥 下载拍摄指南 ZIP",
+                    data=zip_buf,
+                    file_name=f"B站短片拍摄指南_{date_str}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+                st.success("✅ 打包完成，点击上方按钮下载")
+            except Exception as e:
+                st.error(f"打包失败：{e}")
+                st.exception(e)
+else:
+    st.info("请先完成步骤 3 生成剧本")
 
 
 # ============ 底部说明 ============
@@ -624,12 +665,10 @@ st.divider()
 st.caption("""
 💡 **提示**：
 - Key 只存在当前浏览器会话，关闭页面即清除，安全无忧
-- 分镜数量由 AI 根据选题复杂度决定（6-15个），不固定
-- 解说文案严格匹配分镜时长（4字/秒），不会出现文案与视频时长错位
-- 下载素材后系统会根据实际素材时长动态调整脚本，请查看「素材调整建议」
-- 每个分镜都有专属「剪辑建议」，告诉你怎么截取、转场、加特效
-- 交付包为 Word 文档（.docx）格式，直接用 Word/WPS 打开
-- 如果某分镜没抓到素材，可手动去 [Pexels](https://www.pexels.com/zh-cn/videos/) 或 [Pixabay](https://pixabay.com/videos/) 搜中文关键词
-- 热点抓取失败是正常的，会自动降级到季节性种子话题，不影响使用
+- 剧本是三幕剧叙事结构（有主角、冲突、反转），不是配图解说
+- 角色卡提示词用于通义万相生成参考图，场景卡用于锁死空间结构
+- 可灵提示词按场景分组，同场景镜头一次生成保持一致性
+- 每日66免费灵感值约生成6组视频，一条短片约需几天
+- 所有文档为 Word 格式（.docx），Word/WPS 直接打开
 - 建议每天用一次，选题会跟着热点变化
 """)
