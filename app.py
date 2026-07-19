@@ -46,9 +46,33 @@ for k, v in defaults.items():
 
 
 # ============ 应用配置覆盖函数 ============
+def _sanitize_key(value: str) -> str:
+    """
+    清除 API Key 中的非 ASCII 字符。
+    用户从 Word/PDF/网页复制 Key 时，可能混入不可见特殊字符
+    （如 U+F0B7 项目符号、U+200B 零宽空格、U+FEFF BOM 等），
+    这些字符会导致 httpx 构造 HTTP 头时报 UnicodeEncodeError。
+    """
+    if not value:
+        return value
+    # 去掉首尾空白
+    cleaned = value.strip()
+    # 去掉零宽字符、BOM、软连字符
+    invisible = {"\ufeff", "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u00ad"}
+    for ch in invisible:
+        cleaned = cleaned.replace(ch, "")
+    # 只保留 ASCII 可见字符
+    return "".join(c for c in cleaned if 0x20 <= ord(c) <= 0x7E)
+
+
 def apply_keys_to_config(pixabay_key, llm_key, pexels_key):
     """把用户输入的 key 写入 config 模块和环境变量。"""
     import config
+    # 清除可能混入的非 ASCII 字符
+    pixabay_key = _sanitize_key(pixabay_key) if pixabay_key else ""
+    llm_key = _sanitize_key(llm_key) if llm_key else ""
+    pexels_key = _sanitize_key(pexels_key) if pexels_key else ""
+
     os.environ['PIXABAY_API_KEY'] = pixabay_key
     os.environ['PEXELS_API_KEY'] = pexels_key or ''
     os.environ['LLM_API_KEY'] = llm_key
@@ -103,9 +127,19 @@ with st.sidebar:
 
     if st.button("💾 保存配置", use_container_width=True, type="primary"):
         if pixabay_key and llm_key:
+            # 检测并清除非 ASCII 字符
+            warnings = []
+            for name, key in [("Pixabay", pixabay_key), ("Qwen", llm_key), ("Pexels", pexels_key)]:
+                if key:
+                    clean = _sanitize_key(key)
+                    if len(clean) != len(key.strip()):
+                        removed = len(key.strip()) - len(clean)
+                        warnings.append(f"{name} Key 清除了 {removed} 个隐藏字符")
             apply_keys_to_config(pixabay_key, llm_key, pexels_key)
             st.session_state.keys_configured = True
             st.success("✅ 配置已保存，可以开始使用了！")
+            if warnings:
+                st.warning("⚠️ 检测到 Key 中含有非 ASCII 字符（可能是从 Word/PDF 复制时混入的），已自动清除：" + "；".join(warnings))
         else:
             st.error("❌ 必填项未填：Pixabay 和 Qwen Key 都是必填的")
 

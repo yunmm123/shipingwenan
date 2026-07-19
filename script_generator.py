@@ -168,12 +168,48 @@ except ImportError:
     OpenAI = None
 
 
+def _sanitize_ascii(value: str, field_name: str = "API Key") -> str:
+    """
+    清除字符串中的非 ASCII 字符。
+    用户从 Word/PDF/网页复制 API Key 时，可能混入不可见的特殊字符
+    （如 U+F0B7 Symbol 字体的项目符号、零宽空格 U+200B、BOM U+FEFF 等），
+    这些字符会导致 httpx 构造 HTTP 头时报 UnicodeEncodeError。
+    """
+    if not value:
+        return value
+    # 去掉首尾空白（包括不可见空白字符）
+    cleaned = value.strip()
+    # 去掉零宽字符、BOM、软连字符等不可见字符
+    invisible_chars = {
+        "\ufeff",  # BOM / Zero Width No-Break Space
+        "\u200b",  # Zero Width Space
+        "\u200c",  # Zero Width Non-Joiner
+        "\u200d",  # Zero Width Joiner
+        "\u200e",  # Left-to-Right Mark
+        "\u200f",  # Right-to-Left Mark
+        "\u00ad",  # Soft Hyphen
+    }
+    for ch in invisible_chars:
+        cleaned = cleaned.replace(ch, "")
+    # 只保留 ASCII 可见字符（0x20-0x7E）
+    ascii_only = "".join(c for c in cleaned if 0x20 <= ord(c) <= 0x7E)
+    if len(ascii_only) != len(cleaned):
+        removed = len(cleaned) - len(ascii_only)
+        print(f"[配置] ⚠️ {field_name} 含 {removed} 个非 ASCII 字符，已自动清除")
+    return ascii_only
+
+
 def _get_client():
     if not HAS_OPENAI:
         raise RuntimeError("未安装 openai 包，请 pip install openai")
     if not config.LLM_API_KEY:
         raise RuntimeError("LLM_API_KEY 未配置，请检查 .env")
-    return OpenAI(api_key=config.LLM_API_KEY, base_url=config.LLM_API_BASE)
+    # 清除 API Key 和 Base URL 中可能混入的非 ASCII 字符
+    clean_key = _sanitize_ascii(config.LLM_API_KEY, "LLM_API_KEY")
+    clean_base = _sanitize_ascii(config.LLM_API_BASE, "LLM_API_BASE")
+    if not clean_key:
+        raise RuntimeError("LLM_API_KEY 清除非 ASCII 字符后为空，请检查是否复制完整")
+    return OpenAI(api_key=clean_key, base_url=clean_base)
 
 
 def _chat(system: str, user: str, temperature: float = 0.8) -> str:

@@ -96,6 +96,22 @@ def filter_compliant_clips(clips: List[Dict[str, Any]], search_query: str = "") 
     return compliant
 
 
+# ===================== API Key 清洗 =====================
+
+def _sanitize_key(value: str) -> str:
+    """
+    清除 API Key 中的非 ASCII 字符。
+    防止从 Word/PDF 复制的 Key 含隐藏字符导致请求失败。
+    """
+    if not value:
+        return value
+    cleaned = value.strip()
+    invisible = {"\ufeff", "\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u00ad"}
+    for ch in invisible:
+        cleaned = cleaned.replace(ch, "")
+    return "".join(c for c in cleaned if 0x20 <= ord(c) <= 0x7E)
+
+
 # ===================== Pexels =====================
 
 def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
@@ -104,7 +120,8 @@ def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
     新版端点：https://api.pexels.com/v1/videos/search（旧版 /videos/ 即将废弃）
     必须配置 PEXELS_API_KEY。匿名调用只能简单查询，带 orientation/size 筛选时返回 401。
     """
-    if not config.PEXELS_API_KEY:
+    pexels_key = _sanitize_key(config.PEXELS_API_KEY)
+    if not pexels_key:
         print("[素材] Pexels API Key 未配置，跳过（新版端点要求鉴权）")
         return []
 
@@ -118,7 +135,7 @@ def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
     }
     # 注意：search 端点不支持 min_duration/max_duration 参数（只有 popular 端点支持）
     # 所以这里不再传时长过滤，改为拿到结果后在客户端过滤
-    headers = {"Authorization": config.PEXELS_API_KEY}
+    headers = {"Authorization": pexels_key}
 
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=15)
@@ -161,14 +178,15 @@ def pexels_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
 
 def pixabay_search(query: str, per_page: int = 5) -> List[Dict[str, Any]]:
     """搜索 Pixabay 视频，返回标准化结果列表。"""
-    if not config.PIXABAY_API_KEY:
+    pixabay_key = _sanitize_key(config.PIXABAY_API_KEY)
+    if not pixabay_key:
         print("[素材] Pixabay API Key 未配置，跳过")
         return []
 
     url = "https://pixabay.com/api/videos/"
     # Pixabay 分类映射（query 是自由文本，category 是枚举）
     params = {
-        "key": config.PIXABAY_API_KEY,
+        "key": pixabay_key,
         "q": query,
         "video_type": "all",
         "per_page": min(per_page, 200),
