@@ -1,13 +1,18 @@
 """
-热点抓取模块（稳定版）
-直连官方页面/API，无需第三方聚合站，避免 DNS 失败问题。
+热点抓取模块（多源稳定版）
+直连官方页面/API，8 个数据源按优先级自动切换，保证热点丰富度。
 
 数据源（按优先级）：
 1. 百度热搜（官方页面爬取）— 稳定性最高
 2. 今日头条热榜（官方 JSON API）— 稳定性高
-3. 微博热搜（移动版 API）— 备用
-4. DailyHotApi 聚合站 — 备用（依赖第三方部署）
-5. 季节性种子话题 — 最终兜底
+3. 抖音热搜（官方 API）— 短视频热点
+4. 知乎热榜（官方 API）— 深度话题
+5. B站热搜（官方 API）— 年轻人热点
+6. 澎湃新闻热榜（官方 API）— 时政社会
+7. 豆瓣热门电影（官方 API）— 影视文娱
+8. IT之家热榜（官方 API）— 科技数码
+9. DailyHotApi 聚合站 — 备用
+10. 季节性种子话题 — 最终兜底
 """
 import requests
 from bs4 import BeautifulSoup
@@ -24,10 +29,10 @@ HEADERS = {
 }
 
 
-# ============ 数据源 1: 百度热搜（官方页面，最稳定）============
+# ============ 数据源 1: 百度热搜 ============
 
 def fetch_baidu() -> List[Dict[str, Any]]:
-    """抓取百度热搜官方页面，返回标准化列表。"""
+    """百度热搜官方页面爬取。"""
     try:
         r = requests.get('https://top.baidu.com/board?tab=realtime',
                          headers=HEADERS, timeout=15)
@@ -58,10 +63,10 @@ def fetch_baidu() -> List[Dict[str, Any]]:
     return result
 
 
-# ============ 数据源 2: 今日头条热榜（官方 JSON API）============
+# ============ 数据源 2: 今日头条热榜 ============
 
 def fetch_toutiao() -> List[Dict[str, Any]]:
-    """抓取今日头条热榜官方 API，返回标准化列表。"""
+    """今日头条热榜官方 JSON API。"""
     try:
         r = requests.get(
             'https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc',
@@ -89,46 +94,203 @@ def fetch_toutiao() -> List[Dict[str, Any]]:
     return result
 
 
-# ============ 数据源 3: 微博热搜（移动版 API）============
+# ============ 数据源 3: 抖音热搜 ============
 
-def fetch_weibo() -> List[Dict[str, Any]]:
-    """抓取微博热搜移动版 API。"""
+def fetch_douyin() -> List[Dict[str, Any]]:
+    """抖音热搜官方 API。"""
     try:
         r = requests.get(
-            'https://m.weibo.cn/api/container/getIndex',
-            params={'containerid': '106003type%3D25%26t%3D3%26disable_hot%3D1%26filter_type%3Drealtimehot'},
-            headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)'},
+            'https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/',
+            headers=HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[热点] 抖音热搜抓取失败: {e}")
+        return []
+
+    result = []
+    for item in data.get('word_list', []):
+        title = item.get('word', '')
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "hot": str(item.get('hot_value', '')),
+            "url": "",
+            "source": "douyin",
+            "desc": "",
+        })
+    print(f"[热点] 抖音热搜: 抓到 {len(result)} 条")
+    return result
+
+
+# ============ 数据源 4: 知乎热榜 ============
+
+def fetch_zhihu() -> List[Dict[str, Any]]:
+    """知乎热榜官方 API。"""
+    try:
+        r = requests.get(
+            'https://api.zhihu.com/topstory/hot-list?limit=50',
+            headers=HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[热点] 知乎热榜抓取失败: {e}")
+        return []
+
+    result = []
+    for item in data.get('data', []):
+        target = item.get('target', {})
+        title = target.get('title', '')
+        if not title:
+            continue
+        detail = item.get('detail_text', '')
+        result.append({
+            "title": title,
+            "hot": detail,
+            "url": target.get('url', ''),
+            "source": "zhihu",
+            "desc": target.get('excerpt', '')[:100],
+        })
+    print(f"[热点] 知乎热榜: 抓到 {len(result)} 条")
+    return result
+
+
+# ============ 数据源 5: B站热搜 ============
+
+def fetch_bilibili() -> List[Dict[str, Any]]:
+    """B站热搜官方 API。"""
+    try:
+        r = requests.get(
+            'https://api.bilibili.com/x/web-interface/wbi/search/square?limit=30',
+            headers={**HEADERS, 'Referer': 'https://www.bilibili.com'},
             timeout=15
         )
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        print(f"[热点] 微博热搜抓取失败: {e}")
+        print(f"[热点] B站热搜抓取失败: {e}")
         return []
 
     result = []
-    cards = data.get('data', {}).get('cards', [])
-    for card in cards:
-        for item in card.get('card_group', []):
-            desc = item.get('desc', '')
-            if desc and item.get('desc_extr'):  # 有热度的才是热搜
-                result.append({
-                    "title": desc,
-                    "hot": str(item.get('desc_extr', '')),
-                    "url": item.get('scheme', ''),
-                    "source": "weibo",
-                    "desc": "",
-                })
-                if len(result) >= 30:
-                    break
-    print(f"[热点] 微博热搜: 抓到 {len(result)} 条")
+    trending = data.get('data', {}).get('trending', {})
+    for item in trending.get('list', []):
+        title = item.get('keyword', '')
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "hot": str(item.get('hot_id', '')),
+            "url": item.get('uri', ''),
+            "source": "bilibili",
+            "desc": "",
+        })
+    print(f"[热点] B站热搜: 抓到 {len(result)} 条")
     return result
 
 
-# ============ 数据源 4: DailyHotApi 聚合站（备用）============
+# ============ 数据源 6: 澎湃新闻热榜 ============
+
+def fetch_thepaper() -> List[Dict[str, Any]]:
+    """澎湃新闻热榜官方 API。"""
+    try:
+        r = requests.get(
+            'https://cache.thepaper.cn/contentapi/wwwIndex/rightSidebar',
+            headers=HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[热点] 澎湃热榜抓取失败: {e}")
+        return []
+
+    result = []
+    hot_news = data.get('data', {}).get('hotNews', [])
+    for item in hot_news:
+        title = item.get('name', '')
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "hot": str(item.get('nodeId', '')),
+            "url": item.get('contId', ''),
+            "source": "thepaper",
+            "desc": "",
+        })
+    print(f"[热点] 澎湃热榜: 抓到 {len(result)} 条")
+    return result
+
+
+# ============ 数据源 7: 豆瓣热门电影 ============
+
+def fetch_douban() -> List[Dict[str, Any]]:
+    """豆瓣热门电影官方 API。"""
+    try:
+        r = requests.get(
+            'https://movie.douban.com/j/search_subjects',
+            params={'type': 'movie', 'tag': '热门', 'page_limit': 20, 'page_start': 0},
+            headers=HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[热点] 豆瓣电影抓取失败: {e}")
+        return []
+
+    result = []
+    for item in data.get('subjects', []):
+        title = item.get('title', '')
+        if not title:
+            continue
+        result.append({
+            "title": f"电影《{title}》评分{item.get('rate','?')}",
+            "hot": item.get('rate', ''),
+            "url": item.get('url', ''),
+            "source": "douban",
+            "desc": "",
+        })
+    print(f"[热点] 豆瓣电影: 抓到 {len(result)} 条")
+    return result
+
+
+# ============ 数据源 8: IT之家热榜 ============
+
+def fetch_ithome() -> List[Dict[str, Any]]:
+    """IT之家热榜官方 API。"""
+    try:
+        r = requests.get(
+            'https://api.ithome.com/json/newslist/news?r=0',
+            headers=HEADERS, timeout=15
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"[热点] IT之家抓取失败: {e}")
+        return []
+
+    result = []
+    toplist = data.get('toplist', []) if isinstance(data, dict) else []
+    for item in toplist:
+        title = item.get('title', '')
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "hot": str(item.get('postid', '')),
+            "url": item.get('url', ''),
+            "source": "ithome",
+            "desc": item.get('digest', '')[:100],
+        })
+    print(f"[热点] IT之家: 抓到 {len(result)} 条")
+    return result
+
+
+# ============ 数据源 9: DailyHotApi 聚合站（备用）============
 
 def fetch_dailyhot(source: str) -> List[Dict[str, Any]]:
-    """从 DailyHotApi 聚合站抓取（在 Streamlit Cloud 环境可能可用）。"""
+    """DailyHotApi 聚合站（备用）。"""
     base = config.DAILYHOT_BASE
     url = f"{base.rstrip('/')}/{source}"
     try:
@@ -156,65 +318,63 @@ def fetch_dailyhot(source: str) -> List[Dict[str, Any]]:
 
 def fetch_all_hot_topics() -> Dict[str, Any]:
     """
-    聚合抓取所有数据源，按优先级尝试，至少保证一个源成功。
-    返回结构：
-    {
-      "date": "2026-07-19",
-      "fetched_at": "...",
-      "sources_used": ["baidu", "toutiao"],
-      "topics": [...]
-    }
+    聚合抓取所有数据源（8 个官方源 + 1 个备用聚合站）。
+    每个源独立失败不影响其他源，至少保证 1 个源成功。
     """
-    print("[热点] 开始抓取多源热点...")
+    print("[热点] 开始抓取多源热点（8 个官方源）...")
 
-    # 按优先级抓取
     all_topics = []
     sources_used = []
+    sources_failed = []
 
-    # 源1: 百度热搜（最稳定）
-    baidu = fetch_baidu()
-    if baidu:
-        all_topics.extend(baidu)
-        sources_used.append("baidu")
+    # 8 个官方源，按优先级
+    fetchers = [
+        ("baidu", fetch_baidu),
+        ("toutiao", fetch_toutiao),
+        ("douyin", fetch_douyin),
+        ("zhihu", fetch_zhihu),
+        ("bilibili", fetch_bilibili),
+        ("thepaper", fetch_thepaper),
+        ("douban", fetch_douban),
+        ("ithome", fetch_ithome),
+    ]
 
-    # 源2: 今日头条热榜
-    toutiao = fetch_toutiao()
-    if toutiao:
-        all_topics.extend(toutiao)
-        sources_used.append("toutiao")
+    for name, fetcher in fetchers:
+        try:
+            items = fetcher()
+            if items:
+                all_topics.extend(items)
+                sources_used.append(name)
+            else:
+                sources_failed.append(name)
+        except Exception as e:
+            print(f"[热点] {name} 异常: {e}")
+            sources_failed.append(name)
 
-    # 源3: 微博热搜（备用，可能失败）
-    if len(all_topics) < 30:
-        weibo = fetch_weibo()
-        if weibo:
-            all_topics.extend(weibo)
-            sources_used.append("weibo")
-
-    # 源4: DailyHotApi（备用，沙箱环境可能 DNS 失败）
-    if len(all_topics) < 20:
-        for src in ["zhihu", "douyin", "bilibili"]:
+    # 备用：DailyHotApi 聚合站（补抓平台）
+    if len(all_topics) < 50:
+        for src in ["weibo", "kuaishou"]:
             items = fetch_dailyhot(src)
             if items:
                 all_topics.extend(items)
                 sources_used.append(src)
-                if len(all_topics) >= 40:
-                    break
 
-    print(f"[热点] 共抓到 {len(all_topics)} 条，使用源: {sources_used}")
+    print(f"[热点] 共抓到 {len(all_topics)} 条")
+    print(f"[热点] 成功源 ({len(sources_used)}): {sources_used}")
+    if sources_failed:
+        print(f"[热点] 失败源 ({len(sources_failed)}): {sources_failed}")
 
     return {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "sources_used": sources_used,
+        "sources_failed": sources_failed,
         "topics": all_topics,
     }
 
 
 def fallback_topics() -> List[Dict[str, Any]]:
-    """
-    最终兜底方案：当所有外部源都连不上时，返回季节性种子话题。
-    理论上百度热搜几乎不会挂，这个函数只是最后保险。
-    """
+    """最终兜底方案：季节性种子话题。"""
     now = datetime.now()
     month = now.month
     seasonal = {
@@ -240,9 +400,7 @@ def fallback_topics() -> List[Dict[str, Any]]:
 
 
 def keyword_filter(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    规则预过滤：剔除明显不适合做冷知识科普的热点。
-    """
+    """规则预过滤：剔除不适合冷知识的热点，给科学相关热点加分。"""
     blacklist = [
         "出轨", "离婚", "恋情", "官宣", "结婚", "分手", "baby", "网红",
         "直播带货", "粉丝", "应援", "塌房", "番位",
@@ -251,7 +409,8 @@ def keyword_filter(topics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         "发现", "首次", "突破", "研究", "科学", "技术", "宇宙", "病毒",
         "动物", "植物", "历史", "文物", "考古", "气象", "地质", "化学",
         "物理", "生物", "医学", "太空", "深海", "发明", "原理", "现象",
-        "机器人", "AI", "人工智能", "火箭", "卫星",
+        "机器人", "AI", "人工智能", "火箭", "卫星", "芯片", "量子",
+        "基因", "大脑", "神经", "免疫", "细胞",
     ]
 
     filtered = []
@@ -271,11 +430,17 @@ if __name__ == "__main__":
     result = fetch_all_hot_topics()
     print(f"\n=== {result['date']} 热点抓取结果 ===")
     print(f"使用源: {result['sources_used']}")
+    print(f"失败源: {result['sources_failed']}")
     print(f"共 {len(result['topics'])} 条\n")
-    for i, t in enumerate(result["topics"][:15], 1):
-        print(f"{i:2d}. [{t['source']:8s}] {t['title'][:40]}  (热度: {t['hot']})")
+    # 按来源分组统计
+    from collections import Counter
+    src_count = Counter(t['source'] for t in result['topics'])
+    for src, count in src_count.most_common():
+        print(f"  [{src:10s}] {count} 条")
 
-    print("\n=== 规则过滤后（Top 10）===")
-    filtered = keyword_filter(result["topics"])
-    for i, t in enumerate(filtered[:10], 1):
-        print(f"{i:2d}. [{t['source']:8s}] {t['title'][:40]}  (科普分: {t['science_score']})")
+    print("\n=== 各源 Top 3 ===")
+    for src in result['sources_used']:
+        print(f"\n[{src}]")
+        src_topics = [t for t in result['topics'] if t['source'] == src][:3]
+        for i, t in enumerate(src_topics, 1):
+            print(f"  {i}. {t['title'][:40]}  (热度: {t['hot'][:15]})")
